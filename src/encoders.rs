@@ -6,6 +6,15 @@ pub enum EncoderError {
     InvalidImageDimensions(String),
 }
 
+impl EncoderError {
+    pub fn message(&self) -> &str {
+        match self {
+            EncoderError::InvalidData(message) => message,
+            EncoderError::InvalidImageDimensions(message) => message,
+        }
+    }
+}
+
 enum EncodingType {
     PNG,
 }

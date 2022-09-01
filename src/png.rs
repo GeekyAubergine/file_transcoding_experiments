@@ -187,6 +187,7 @@ fn data_to_raw_chunks(data: &[u8]) -> Result<Vec<RawPngChunk>, EncoderError> {
     Ok(chunks)
 }
 
+#[derive(Debug, Clone)]
 enum PngChunk<'a> {
     IHDR {
         width: u32,
@@ -305,76 +306,82 @@ fn validate_chunks(
     chunks: Result<Vec<PngChunk>, EncoderError>,
 ) -> Result<Vec<PngChunk>, EncoderError> {
     if let Ok(chunks) = chunks {
-        let mut valid_chunks = Vec::new();
+        if chunks.is_empty() {
+            return Err(EncoderError::InvalidData("No chunks given".to_string()));
+        }
+
+        let mut valid_chunks: Vec<PngChunk> = Vec::new();
         let mut has_ihdr = false;
         let mut has_idat = false;
-        let mut has_started_idat = false;
-        let mut has_ended_idat = false;
         let mut has_iend = false;
-        for chunk in chunks {
+        let mut has_ended_idat = false;
+
+        for (index, chunk) in chunks.iter().enumerate() {
             // All IDAT chunks must be consecutive
             match chunk {
-                PngChunk::IDAT { .. } => {}
-                _ => {
+                PngChunk::IDAT { .. } => {
                     if has_ended_idat {
                         return Err(EncoderError::InvalidImageDimensions(
-                            "Chunk after end of IDAT block".to_string(),
+                            "IDAT chunk after end of IDAT block".to_string(),
                         ));
+                    }
+                }
+                _ => {
+                    if has_idat {
+                        has_ended_idat = true;
                     }
                 }
             }
 
-            match chunk {
-                PngChunk::IHDR { .. } => {
+            match (index, chunk) {
+                (0, PngChunk::IHDR { .. }) => {
+                    valid_chunks.push(chunk.clone());
+                    has_ihdr = true;
+                }
+                (_, PngChunk::IHDR { .. }) => {
                     if has_ihdr {
-                        return Err(EncoderError::InvalidData(
+                        return Err(EncoderError::InvalidImageDimensions(
                             "Multiple IHDR chunks".to_string(),
                         ));
                     }
-                    has_ihdr = true;
-                    valid_chunks.push(chunk);
+                    return Err(EncoderError::InvalidData(
+                        "IHDR chunk must be first".to_string(),
+                    ));
                 }
-                PngChunk::IDAT { .. } => {
-                    if !has_ihdr {
+                (index, PngChunk::IEND) => {
+                    if index != chunks.len() - 1 {
                         return Err(EncoderError::InvalidData(
-                            "IDAT chunk before IHDR".to_string(),
+                            "IEND chunk must be last".to_string(),
                         ));
                     }
-                    has_started_idat = true;
-                    has_idat = true;
-                    valid_chunks.push(chunk);
-                }
-                PngChunk::IEND => {
-                    if has_iend {
-                        return Err(EncoderError::InvalidData(
-                            "Multiple IEND chunks".to_string(),
-                        ));
-                    }
+                    valid_chunks.push(PngChunk::IEND);
                     has_iend = true;
-                    valid_chunks.push(chunk);
                 }
-                PngChunk::Other => {
-                    if !has_ihdr {
-                        return Err(EncoderError::InvalidData("Chunk before IHDR".to_string()));
-                    }
-                    if has_iend {
-                        return Err(EncoderError::InvalidData("Chunk after IEND".to_string()));
-                    }
+                (_, PngChunk::IDAT { .. }) => {
+                    has_idat = true;
+                    valid_chunks.push(chunk.clone());
+                }
+                (_, PngChunk::Other) => {
+                    valid_chunks.push(chunk.clone());
                 }
             }
         }
+
         if !has_ihdr {
             return Err(EncoderError::InvalidData("No IHDR chunk".to_string()));
         }
+
         if !has_idat {
-            return Err(EncoderError::InvalidData("No IDAT chunk".to_string()));
+            return Err(EncoderError::InvalidData("No IDAT chunks".to_string()));
         }
+
         if !has_iend {
             return Err(EncoderError::InvalidData("No IEND chunk".to_string()));
         }
+
         Ok(valid_chunks)
     } else {
-        chunks
+        Err(EncoderError::InvalidData("No chunks".to_string()))
     }
 }
 
@@ -413,5 +420,154 @@ impl Encodable for PNG {
         window.show().unwrap();
 
         todo!()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    // ---- chunk validation
+
+    use super::validate_chunks;
+    use super::PngChunk;
+
+    #[test]
+    fn test_validate_chunks_no_chunks() {
+        let chunks = vec![];
+        let chunks = validate_chunks(Ok(chunks));
+        assert!(chunks.is_err());
+        assert_eq!(
+            chunks.err().unwrap().message(),
+            "No chunks given".to_string()
+        );
+    }
+
+    #[test]
+    fn test_validate_chunks_no_ihdr() {
+        let data = Vec::new();
+        let chunks = vec![PngChunk::IDAT { data: &data }];
+        let chunks = validate_chunks(Ok(chunks));
+        assert!(chunks.is_err());
+        assert_eq!(chunks.err().unwrap().message(), "No IHDR chunk".to_string());
+    }
+
+    #[test]
+    fn test_validate_chunks_no_idat() {
+        let chunks = vec![PngChunk::IHDR {
+            width: 1,
+            height: 1,
+            bit_depth: 1,
+            color_type: 1,
+            compression_method: 1,
+            filter_method: 1,
+            interlace_method: 1,
+        }];
+        let chunks = validate_chunks(Ok(chunks));
+        assert!(chunks.is_err());
+        assert_eq!(
+            chunks.err().unwrap().message(),
+            "No IDAT chunks".to_string()
+        );
+    }
+
+    #[test]
+    fn test_validate_chunks_no_iend() {
+        let data = Vec::new();
+        let chunks = vec![
+            PngChunk::IHDR {
+                width: 1,
+                height: 1,
+                bit_depth: 1,
+                color_type: 1,
+                compression_method: 1,
+                filter_method: 1,
+                interlace_method: 1,
+            },
+            PngChunk::IDAT { data: &data },
+        ];
+        let chunks = validate_chunks(Ok(chunks));
+        assert!(chunks.is_err());
+        assert_eq!(chunks.err().unwrap().message(), "No IEND chunk".to_string());
+    }
+
+    #[test]
+    fn test_validate_chunks_multiple_ihdr() {
+        let chunks = vec![
+            PngChunk::IHDR {
+                width: 1,
+                height: 1,
+                bit_depth: 1,
+                color_type: 1,
+                compression_method: 1,
+                filter_method: 1,
+                interlace_method: 1,
+            },
+            PngChunk::IHDR {
+                width: 1,
+                height: 1,
+                bit_depth: 1,
+                color_type: 1,
+                compression_method: 1,
+                filter_method: 1,
+                interlace_method: 1,
+            },
+        ];
+        let chunks = validate_chunks(Ok(chunks));
+        assert!(chunks.is_err());
+        assert_eq!(
+            chunks.err().unwrap().message(),
+            "Multiple IHDR chunks".to_string()
+        );
+    }
+
+    #[test]
+    fn test_validate_chunks_multiple_separated_idat() {
+        let data = Vec::new();
+
+        let chunks = vec![
+            PngChunk::IHDR {
+                width: 1,
+                height: 1,
+                bit_depth: 1,
+                color_type: 1,
+                compression_method: 1,
+                filter_method: 1,
+                interlace_method: 1,
+            },
+            PngChunk::IDAT { data: &data },
+            PngChunk::Other, 
+            PngChunk::IDAT { data: &data },
+        ];
+        let chunks = validate_chunks(Ok(chunks));
+        assert!(chunks.is_err());
+        assert_eq!(
+            chunks.err().unwrap().message(),
+            "IDAT chunk after end of IDAT block".to_string()
+        );
+    }
+
+    #[test]
+    fn test_validate_chunks_multiple_iend() {
+        let data = Vec::new();
+
+        let chunks = vec![
+            PngChunk::IHDR {
+                width: 1,
+                height: 1,
+                bit_depth: 1,
+                color_type: 1,
+                compression_method: 1,
+                filter_method: 1,
+                interlace_method: 1,
+            },
+            PngChunk::IDAT { data: &data },
+            PngChunk::IEND,
+            PngChunk::IEND,
+        ];
+        let chunks = validate_chunks(Ok(chunks));
+        assert!(chunks.is_err());
+        assert_eq!(
+            chunks.err().unwrap().message(),
+            "IEND chunk must be last".to_string()
+        );
     }
 }
