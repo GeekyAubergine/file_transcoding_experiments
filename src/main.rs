@@ -4,17 +4,44 @@ mod encoders;
 mod png;
 mod window;
 
-type PixelData = u16;
-
-pub enum DataType {
-    ARGB_8888,
+#[derive(Debug, Clone)]
+pub struct PixelData {
+    r: u16,
+    g: u16,
+    b: u16,
+    a: u16,
 }
 
+impl PixelData {
+    fn new(r: u16, g: u16, b: u16, a: u16) -> PixelData {
+        PixelData { r, g, b, a }
+    }
+    fn white() -> PixelData {
+        PixelData::new(65535, 65535, 65535, 65535)
+    }
+    fn black() -> PixelData {
+        PixelData::new(0, 0, 0, 65535)
+    }
+    fn rgba(&self) -> (u16, u16, u16, u16) {
+        (self.r, self.g, self.b, self.a)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ImageData {
     width: u32,
     height: u32,
     pixels: Vec<PixelData>,
-    data_type: DataType,
+}
+
+impl ImageData {
+    pub fn new(width: u32, height: u32, pixels: Vec<PixelData>) -> ImageData {
+        ImageData {
+            width,
+            height,
+            pixels,
+        }
+    }
 }
 
 enum MagicNumbers {
@@ -68,6 +95,10 @@ pub fn u32_to_hex(x: u32) -> String {
 pub fn u32_to_dec(x: u32) -> String {
     let data = u32_to_u8(x);
     format!("{} {} {} {}", data.0, data.1, data.2, data.3)
+}
+
+pub fn u32_to_bin(x: u32) -> String {
+    format!("{:b}", x)
 }
 
 // fn magic_numbers_for_data

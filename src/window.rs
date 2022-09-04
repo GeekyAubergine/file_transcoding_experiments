@@ -1,8 +1,15 @@
+use std::error;
+
 use pixels::{Error, Pixels, SurfaceTexture};
-use winit::{dpi::LogicalSize, event_loop::EventLoop, window::WindowBuilder};
+use winit::{
+    dpi::LogicalSize,
+    event::Event,
+    event_loop::{ControlFlow, EventLoop},
+    window::WindowBuilder,
+};
 use winit_input_helper::WinitInputHelper;
 
-use crate::{DataType, ImageData};
+use crate::ImageData;
 
 pub struct Window {
     image_data: ImageData,
@@ -34,20 +41,28 @@ impl Window {
             surface_texture,
         )?;
 
-        match self.image_data.data_type {
-            DataType::ARGB_8888 => {
-                self.image_data
-                    .pixels
-                    .iter()
-                    .enumerate()
-                    .for_each(|(index, pixel)| {
-                        frame_pixels.get_frame()[index] = *pixel as u8;
-                    });
-            }
-            _ => {}
-        }
+        self.image_data
+            .pixels
+            .iter()
+            .enumerate()
+            .for_each(|(index, pixel)| {
+                let pixel_index = index * 4;
+                let (r, g, b, a) = pixel.rgba();
+
+                frame_pixels.get_frame()[pixel_index] = (r / 2) as u8;
+                frame_pixels.get_frame()[pixel_index + 1] = (g / 2) as u8;
+                frame_pixels.get_frame()[pixel_index + 2] = (b / 2) as u8;
+                frame_pixels.get_frame()[pixel_index + 3] = (a / 2) as u8;
+            });
 
         event_loop.run(move |event, _, control_flow| {
+            // Draw the current frame
+            if let Event::RedrawRequested(_) = event {
+                if frame_pixels.render().is_err() {
+                    *control_flow = ControlFlow::Exit;
+                    return;
+                }
+            }
             if input.update(&event) {
                 if input.key_pressed(winit::event::VirtualKeyCode::Escape) {
                     *control_flow = winit::event_loop::ControlFlow::Exit;

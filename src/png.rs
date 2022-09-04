@@ -1,8 +1,11 @@
+use miniz_oxide::inflate::{decompress_to_vec, decompress_to_vec_zlib};
+use pixels::wgpu::Color;
+
 use crate::{
     encoders::{Encodable, EncoderError},
-    print_data_as_hex, u32_to_dec, u32_to_hex, u8_to_u32,
+    print_data_as_hex, u32_to_bin, u32_to_dec, u32_to_hex, u8_to_u32,
     window::Window,
-    DataType, ImageData,
+    ImageData, PixelData,
 };
 
 pub struct PNG {}
@@ -29,7 +32,7 @@ const PNG_CHUNK_TYPE_SPLT: u32 = u8_to_u32(115, 80, 76, 84);
 const PNG_CHUNK_TYPE_TIME: u32 = u8_to_u32(116, 73, 77, 69);
 
 #[derive(Debug)]
-enum PNG_Chunk_Type {
+enum PNGChunkType {
     IHDR,
     PLTE,
     IDAT,
@@ -50,7 +53,7 @@ enum PNG_Chunk_Type {
     TIME,
 }
 
-impl PNG_Chunk_Type {
+impl PNGChunkType {
     fn value(&self) -> Option<u32> {
         match self {
             Self::IHDR => Some(PNG_CHUNK_TYPE_IHDR),
@@ -73,26 +76,26 @@ impl PNG_Chunk_Type {
             Self::TIME => Some(PNG_CHUNK_TYPE_TIME),
         }
     }
-    pub fn from_u32(value: u32) -> Option<PNG_Chunk_Type> {
+    pub fn from_u32(value: u32) -> Option<PNGChunkType> {
         match value {
-            PNG_CHUNK_TYPE_IHDR => Some(PNG_Chunk_Type::IHDR),
-            PNG_CHUNK_TYPE_PLTE => Some(PNG_Chunk_Type::PLTE),
-            PNG_CHUNK_TYPE_IDAT => Some(PNG_Chunk_Type::IDAT),
-            PNG_CHUNK_TYPE_IEND => Some(PNG_Chunk_Type::IEND),
-            PNG_CHUNK_TYPE_TRNS => Some(PNG_Chunk_Type::TRNS),
-            PNG_CHUNK_TYPE_CHRM => Some(PNG_Chunk_Type::CHRM),
-            PNG_CHUNK_TYPE_GAMA => Some(PNG_Chunk_Type::GAMA),
-            PNG_CHUNK_TYPE_ICCP => Some(PNG_Chunk_Type::ICCP),
-            PNG_CHUNK_TYPE_SRGB => Some(PNG_Chunk_Type::SRGB),
-            PNG_CHUNK_TYPE_SBIT => Some(PNG_Chunk_Type::SBIT),
-            PNG_CHUNK_TYPE_TEXT => Some(PNG_Chunk_Type::TEXT),
-            PNG_CHUNK_TYPE_ZTXT => Some(PNG_Chunk_Type::ZTXT),
-            PNG_CHUNK_TYPE_ITXT => Some(PNG_Chunk_Type::ITXT),
-            PNG_CHUNK_TYPE_BKGD => Some(PNG_Chunk_Type::BKGD),
-            PNG_CHUNK_TYPE_HIST => Some(PNG_Chunk_Type::HIST),
-            PNG_CHUNK_TYPE_PHYS => Some(PNG_Chunk_Type::PHYS),
-            PNG_CHUNK_TYPE_SPLT => Some(PNG_Chunk_Type::SPLT),
-            PNG_CHUNK_TYPE_TIME => Some(PNG_Chunk_Type::TIME),
+            PNG_CHUNK_TYPE_IHDR => Some(PNGChunkType::IHDR),
+            PNG_CHUNK_TYPE_PLTE => Some(PNGChunkType::PLTE),
+            PNG_CHUNK_TYPE_IDAT => Some(PNGChunkType::IDAT),
+            PNG_CHUNK_TYPE_IEND => Some(PNGChunkType::IEND),
+            PNG_CHUNK_TYPE_TRNS => Some(PNGChunkType::TRNS),
+            PNG_CHUNK_TYPE_CHRM => Some(PNGChunkType::CHRM),
+            PNG_CHUNK_TYPE_GAMA => Some(PNGChunkType::GAMA),
+            PNG_CHUNK_TYPE_ICCP => Some(PNGChunkType::ICCP),
+            PNG_CHUNK_TYPE_SRGB => Some(PNGChunkType::SRGB),
+            PNG_CHUNK_TYPE_SBIT => Some(PNGChunkType::SBIT),
+            PNG_CHUNK_TYPE_TEXT => Some(PNGChunkType::TEXT),
+            PNG_CHUNK_TYPE_ZTXT => Some(PNGChunkType::ZTXT),
+            PNG_CHUNK_TYPE_ITXT => Some(PNGChunkType::ITXT),
+            PNG_CHUNK_TYPE_BKGD => Some(PNGChunkType::BKGD),
+            PNG_CHUNK_TYPE_HIST => Some(PNGChunkType::HIST),
+            PNG_CHUNK_TYPE_PHYS => Some(PNGChunkType::PHYS),
+            PNG_CHUNK_TYPE_SPLT => Some(PNGChunkType::SPLT),
+            PNG_CHUNK_TYPE_TIME => Some(PNGChunkType::TIME),
             _ => None,
         }
     }
@@ -120,16 +123,193 @@ impl PNG_Chunk_Type {
     }
 }
 
+#[derive(Debug, Clone)]
+enum BitDepth {
+    One,
+    Two,
+    Four,
+    Eight,
+    Sixteen,
+}
+
+impl BitDepth {
+    fn value(&self) -> u8 {
+        match self {
+            Self::One => 1,
+            Self::Two => 2,
+            Self::Four => 4,
+            Self::Eight => 8,
+            Self::Sixteen => 16,
+        }
+    }
+    fn from_u8(value: u8) -> Result<BitDepth, EncoderError> {
+        match value {
+            1 => Ok(BitDepth::One),
+            2 => Ok(BitDepth::Two),
+            4 => Ok(BitDepth::Four),
+            8 => Ok(BitDepth::Eight),
+            16 => Ok(BitDepth::Sixteen),
+            _ => Err(EncoderError::InvalidData(format!(
+                "Invalid bit depth: {}",
+                value
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ColorType {
+    Grayscale,
+    Truecolor,
+    IndexedColor,
+    GrayscaleAlpha,
+    TruecolorAlpha,
+}
+
+impl ColorType {
+    fn value(&self) -> u8 {
+        match self {
+            Self::Grayscale => 0,
+            Self::Truecolor => 2,
+            Self::IndexedColor => 3,
+            Self::GrayscaleAlpha => 4,
+            Self::TruecolorAlpha => 6,
+        }
+    }
+    fn from_u8_and_bit_depth(value: u8, bit_depth: &BitDepth) -> Result<ColorType, EncoderError> {
+        match value {
+            0 => match bit_depth {
+                BitDepth::One => Ok(ColorType::Grayscale),
+                BitDepth::Two => Ok(ColorType::Grayscale),
+                BitDepth::Four => Ok(ColorType::Grayscale),
+                BitDepth::Eight => Ok(ColorType::Grayscale),
+                BitDepth::Sixteen => Ok(ColorType::Grayscale),
+            },
+            2 => match bit_depth {
+                BitDepth::Eight => Ok(ColorType::Truecolor),
+                BitDepth::Sixteen => Ok(ColorType::Truecolor),
+                _ => Err(EncoderError::InvalidData(format!(
+                    "Invalid bit depth: {} for color type: {}",
+                    bit_depth.value(),
+                    value
+                ))),
+            },
+            3 => match bit_depth {
+                BitDepth::One => Ok(ColorType::IndexedColor),
+                BitDepth::Two => Ok(ColorType::IndexedColor),
+                BitDepth::Four => Ok(ColorType::IndexedColor),
+                BitDepth::Eight => Ok(ColorType::IndexedColor),
+                _ => Err(EncoderError::InvalidData(format!(
+                    "Invalid bit depth: {} for color type: {}",
+                    bit_depth.value(),
+                    value
+                ))),
+            },
+            4 => match bit_depth {
+                BitDepth::Eight => Ok(ColorType::GrayscaleAlpha),
+                BitDepth::Sixteen => Ok(ColorType::GrayscaleAlpha),
+                _ => Err(EncoderError::InvalidData(format!(
+                    "Invalid bit depth: {} for color type: {}",
+                    bit_depth.value(),
+                    value
+                ))),
+            },
+            6 => match bit_depth {
+                BitDepth::Eight => Ok(ColorType::TruecolorAlpha),
+                BitDepth::Sixteen => Ok(ColorType::TruecolorAlpha),
+                _ => Err(EncoderError::InvalidData(format!(
+                    "Invalid bit depth: {} for color type: {}",
+                    bit_depth.value(),
+                    value
+                ))),
+            },
+            _ => Err(EncoderError::InvalidData(format!(
+                "Invalid color type: {}",
+                value
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum CompressionMethod {
+    Deflate,
+}
+
+impl CompressionMethod {
+    fn value(&self) -> u8 {
+        match self {
+            Self::Deflate => 0,
+        }
+    }
+    fn from_u8(value: u8) -> Result<CompressionMethod, EncoderError> {
+        match value {
+            0 => Ok(CompressionMethod::Deflate),
+            _ => Err(EncoderError::InvalidData(format!(
+                "Invalid compression method: {}",
+                value
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum FilterMethod {
+    Adaptive,
+}
+
+impl FilterMethod {
+    fn value(&self) -> u8 {
+        match self {
+            Self::Adaptive => 0,
+        }
+    }
+    fn from_u8(value: u8) -> Result<FilterMethod, EncoderError> {
+        match value {
+            0 => Ok(FilterMethod::Adaptive),
+            _ => Err(EncoderError::InvalidData(format!(
+                "Invalid filter method: {}",
+                value
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum InterlaceMethod {
+    None,
+    Adam7,
+}
+
+impl InterlaceMethod {
+    fn value(&self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Adam7 => 1,
+        }
+    }
+    fn from_u8(value: u8) -> Result<InterlaceMethod, EncoderError> {
+        match value {
+            0 => Ok(InterlaceMethod::None),
+            1 => Ok(InterlaceMethod::Adam7),
+            _ => Err(EncoderError::InvalidData(format!(
+                "Invalid interlace method: {}",
+                value
+            ))),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct RawPngChunk {
     length: u32,
-    chunk_type: PNG_Chunk_Type,
+    chunk_type: PNGChunkType,
     data: Vec<u8>,
     crc: u32,
 }
 
 impl RawPngChunk {
-    fn new(length: u32, chunk_type: PNG_Chunk_Type, data: Vec<u8>, crc: u32) -> RawPngChunk {
+    fn new(length: u32, chunk_type: PNGChunkType, data: Vec<u8>, crc: u32) -> RawPngChunk {
         RawPngChunk {
             length,
             chunk_type,
@@ -171,7 +351,7 @@ fn data_to_raw_chunks(data: &[u8]) -> Result<Vec<RawPngChunk>, EncoderError> {
             data[current_offset + 11 + length as usize],
         );
 
-        if let Some(chunk_type) = PNG_Chunk_Type::from_u32(chunk_type) {
+        if let Some(chunk_type) = PNGChunkType::from_u32(chunk_type) {
             let chunk = RawPngChunk::new(length, chunk_type, chunk_data.to_vec(), crc);
             chunks.push(chunk);
         } else {
@@ -188,27 +368,27 @@ fn data_to_raw_chunks(data: &[u8]) -> Result<Vec<RawPngChunk>, EncoderError> {
 }
 
 #[derive(Debug, Clone)]
-enum PngChunk<'a> {
+enum PngChunk {
     IHDR {
         width: u32,
         height: u32,
-        bit_depth: u8,
-        color_type: u8,
-        compression_method: u8,
-        filter_method: u8,
-        interlace_method: u8,
+        bit_depth: BitDepth,
+        color_type: ColorType,
+        compression_method: CompressionMethod,
+        filter_method: FilterMethod,
+        interlace_method: InterlaceMethod,
     },
     IDAT {
-        data: &'a Vec<u8>,
+        data: Vec<u8>,
     },
     IEND,
     Other,
 }
 
-impl<'a> PngChunk<'a> {
+impl PngChunk {
     fn from_raw_chunk(chunk: &RawPngChunk) -> Result<PngChunk, EncoderError> {
         match chunk.chunk_type {
-            PNG_Chunk_Type::IHDR => {
+            PNGChunkType::IHDR => {
                 let width = u8_to_u32(chunk.data[0], chunk.data[1], chunk.data[2], chunk.data[3]);
                 let height = u8_to_u32(chunk.data[4], chunk.data[5], chunk.data[6], chunk.data[7]);
                 let bit_depth = chunk.data[8];
@@ -225,46 +405,11 @@ impl<'a> PngChunk<'a> {
                     ));
                 }
 
-                if color_type == 0 {
-                    if bit_depth != 1
-                        && bit_depth != 2
-                        && bit_depth != 4
-                        && bit_depth != 8
-                        && bit_depth != 16
-                    {
-                        return Err(EncoderError::InvalidImageDimensions(
-                            "Invalid bit depth for color type 0".to_string(),
-                        ));
-                    }
-                } else if color_type == 2 {
-                    if bit_depth != 8 && bit_depth != 16 {
-                        return Err(EncoderError::InvalidImageDimensions(
-                            "Invalid bit depth for color type 2".to_string(),
-                        ));
-                    }
-                } else if color_type == 3 {
-                    if bit_depth != 1 && bit_depth != 2 && bit_depth != 4 && bit_depth != 8 {
-                        return Err(EncoderError::InvalidImageDimensions(
-                            "Invalid bit depth for color type 3".to_string(),
-                        ));
-                    }
-                } else if color_type == 4 {
-                    if bit_depth != 8 && bit_depth != 16 {
-                        return Err(EncoderError::InvalidImageDimensions(
-                            "Invalid bit depth for color type 4".to_string(),
-                        ));
-                    }
-                } else if color_type == 6 {
-                    if bit_depth != 8 && bit_depth != 16 {
-                        return Err(EncoderError::InvalidImageDimensions(
-                            "Invalid bit depth for color type 6".to_string(),
-                        ));
-                    }
-                } else {
-                    return Err(EncoderError::InvalidImageDimensions(
-                        "Invalid color type".to_string(),
-                    ));
-                }
+                let bit_depth = BitDepth::from_u8(bit_depth)?;
+                let color_type = ColorType::from_u8_and_bit_depth(color_type, &bit_depth)?;
+                let compression_method = CompressionMethod::from_u8(compression_method)?;
+                let filter_method = FilterMethod::from_u8(filter_method)?;
+                let interlace_method = InterlaceMethod::from_u8(interlace_method)?;
 
                 Ok(PngChunk::IHDR {
                     width,
@@ -276,8 +421,18 @@ impl<'a> PngChunk<'a> {
                     interlace_method,
                 })
             }
-            PNG_Chunk_Type::IDAT => Ok(PngChunk::IDAT { data: &chunk.data }),
-            PNG_Chunk_Type::IEND => Ok(PngChunk::IEND),
+            PNGChunkType::IDAT => {
+                return Ok(PngChunk::IDAT {
+                    // data: chunk.data.clone(),
+                    data: decompress_to_vec_zlib(&chunk.data)?,
+                });
+                // let data = decompress_to_vec(chunk.data.as_slice());
+                // match data {
+                //     Ok(data) => Ok(PngChunk::IDAT { data }),
+                //     Err(_) => Err(EncoderError::InvalidData("Invalid IDAT chunk".to_string())),
+                // }
+            }
+            PNGChunkType::IEND => Ok(PngChunk::IEND),
             _ => Ok(PngChunk::Other), // _ => panic!("Unknown chunk type"),
         }
     }
@@ -293,7 +448,7 @@ impl<'a> PngChunk<'a> {
                 interlace_method,
             } => format!(
                 "IHDR: width: {}, height: {}, bit_depth: {}, color_type: {}, compression_method: {}, filter_method: {}, interlace_method: {}",
-                width, height, bit_depth, color_type, compression_method, filter_method, interlace_method
+                width, height, bit_depth.value(), color_type.value(), compression_method.value(), filter_method.value(), interlace_method.value()
             ),
             Self::IDAT { data } => format!("IDAT: data len: {}", data.len()),
             Self::IEND => "IEND".to_string(),
@@ -385,6 +540,192 @@ fn validate_chunks(
     }
 }
 
+fn bytes_per_scanline(width: u32, color_type: &ColorType, bit_depth: &BitDepth) -> u32 {
+    match color_type {
+        ColorType::Grayscale => {
+            let bits_per_pixel = bit_depth.value() as u32;
+            let bits_per_scanline = width * bits_per_pixel;
+            let bytes_per_scanline = bits_per_scanline / 8;
+            if bits_per_scanline % 8 != 0 {
+                bytes_per_scanline + 1
+            } else {
+                bytes_per_scanline
+            }
+        }
+        _ => todo!(),
+    }
+}
+
+struct PngFileMetadata {
+    width: u32,
+    height: u32,
+    bit_depth: BitDepth,
+    color_type: ColorType,
+    compression_method: CompressionMethod,
+    filter_method: FilterMethod,
+    interlace_method: InterlaceMethod,
+}
+
+struct PngFile {
+    metadata: PngFileMetadata,
+    data: Vec<u8>,
+}
+
+fn scanline_to_pixels_data(scanline: &[u8], bit_depth: &BitDepth) -> Vec<PixelData> {
+    match bit_depth {
+        BitDepth::One => {
+            scanline
+                .iter()
+                .map(|byte| {
+                    let mut pixels = Vec::with_capacity(8);
+                    for i in 0..8 {
+                        let bit = (byte >> (7 - i)) & 1;
+                        if bit == 1 {
+                            pixels.push(PixelData::white())
+                        } else {
+                            pixels.push(PixelData::black())
+                        }
+                    }
+                    pixels
+                })
+                .flatten()
+                .collect()
+        }
+        _ => todo!(),
+    }
+}
+
+// fn pixels_data_to_pixles(
+//     pixels_data: &[u16],
+//     color_type: &ColorType,
+//     bit_depth: &BitDepth,
+// ) -> Vec<u16> {
+//     match color_type {
+//         ColorType::Grayscale => match bit_depth {
+//             BitDepth::One => {
+//                 let mut pixels = Vec::new();
+//                 for pixel in pixels_data.iter() {
+//                     let pixel = if pixel == &0 { 0 } else { 255 };
+//                     pixels.push(pixel);
+//                 }
+//                 pixels
+//             }
+//             _ => todo!(),
+//         },
+//         _ => todo!(),
+//     }
+// }
+
+impl PngFile {
+    fn new(chunks: Vec<PngChunk>) -> Result<Self, EncoderError> {
+        let mut metadata: Option<PngFileMetadata> = None;
+        let mut data: Vec<u8> = Vec::new();
+
+        for chunk in chunks {
+            match chunk {
+                PngChunk::IHDR {
+                    width,
+                    height,
+                    bit_depth,
+                    color_type,
+                    compression_method,
+                    filter_method,
+                    interlace_method,
+                } => {
+                    metadata = Some(PngFileMetadata {
+                        width,
+                        height,
+                        bit_depth,
+                        color_type,
+                        compression_method,
+                        filter_method,
+                        interlace_method,
+                    });
+                }
+                PngChunk::IDAT { data: idat_data } => {
+                    data.extend(idat_data);
+                }
+                PngChunk::IEND => {}
+                PngChunk::Other => {}
+            }
+        }
+
+        match metadata {
+            Some(metadata) => Ok(Self { metadata, data }),
+            None => Err(EncoderError::InvalidData("No metadata".to_string())),
+        }
+    }
+
+    fn width(&self) -> u32 {
+        self.metadata.width
+    }
+
+    fn height(&self) -> u32 {
+        self.metadata.height
+    }
+
+    fn color_type(&self) -> &ColorType {
+        &self.metadata.color_type
+    }
+
+    fn bit_depth(&self) -> &BitDepth {
+        &self.metadata.bit_depth
+    }
+
+    fn to_image_data(&self) -> Result<ImageData, EncoderError> {
+        let mut lines = Vec::new();
+        // for line in 0..self.height() {
+        //     let mut line = Vec::new();
+        //     for pixel in 0..self.width() {
+        //         let pixel = 0;
+        //         line.push(PixelData::white());
+        //     }
+        //     lines.push(line);
+        // }
+
+        print!("{:?}", self.data);
+
+        // let data = decompress_to_vec_zlib(self.data.as_slice())?;
+
+        print!("{:?}", self.data);
+        println!("width: {}, height: {}", self.width(), self.height());
+        let scan_length =
+            bytes_per_scanline(self.width(), self.color_type(), self.bit_depth()) as usize + 1;
+        println!("Scan length: {}", scan_length);
+        for line in self.data.chunks(scan_length) {
+            println!("Line: {:?}", line.len());
+            if line.len() != scan_length {
+                return Err(EncoderError::InvalidData(
+                    "Invalid scanline length".to_string(),
+                ));
+            }
+            let filter = line[0];
+            println!("Filter: {} {}", filter, u32_to_bin(filter as u32));
+            let line_data = &line[1..];
+
+            let pixels = scanline_to_pixels_data(line_data, self.bit_depth());
+
+            // let pixels = pixels_data_to_pixles(&pixels_data, self.color_type(), self.bit_depth());
+
+            println!(
+                "Line data: {:?}",
+                line_data.chunks(self.bit_depth().value() as usize)
+            );
+
+            // println!("Pixels data: {:?}", pixels_data);
+
+            println!("Pixels: {:?} {}", pixels, pixels.len());
+            lines.push(pixels);
+        }
+
+        Ok(ImageData {
+            width: self.width(),
+            height: self.height(),
+            pixels: lines.into_iter().flatten().collect(),
+        })
+    }
+}
+
 impl Encodable for PNG {
     fn data_matches_format(&self, data: &[u8]) -> bool {
         data.len() > 8 && data[0..8] == [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
@@ -406,16 +747,15 @@ impl Encodable for PNG {
 
         let chunks = validate_chunks(chunks)?;
 
-        for chunk in chunks {
+        for chunk in chunks.clone() {
             println!("{}", chunk.as_string());
         }
 
-        let window = Window::new(ImageData {
-            width: 200,
-            height: 300,
-            pixels: Vec::new(),
-            data_type: DataType::ARGB_8888,
-        });
+        let png_file = PngFile::new(chunks)?;
+
+        let image_data = png_file.to_image_data()?;
+
+        let window = Window::new(image_data);
 
         window.show().unwrap();
 
@@ -426,6 +766,13 @@ impl Encodable for PNG {
 #[cfg(test)]
 mod test {
     // ---- chunk validation
+
+    use crate::png::bytes_per_scanline;
+    use crate::png::BitDepth;
+    use crate::png::ColorType;
+    use crate::png::CompressionMethod;
+    use crate::png::FilterMethod;
+    use crate::png::InterlaceMethod;
 
     use super::validate_chunks;
     use super::PngChunk;
@@ -443,8 +790,7 @@ mod test {
 
     #[test]
     fn test_validate_chunks_no_ihdr() {
-        let data = Vec::new();
-        let chunks = vec![PngChunk::IDAT { data: &data }];
+        let chunks = vec![PngChunk::IDAT { data: Vec::new() }];
         let chunks = validate_chunks(Ok(chunks));
         assert!(chunks.is_err());
         assert_eq!(chunks.err().unwrap().message(), "No IHDR chunk".to_string());
@@ -455,11 +801,11 @@ mod test {
         let chunks = vec![PngChunk::IHDR {
             width: 1,
             height: 1,
-            bit_depth: 1,
-            color_type: 1,
-            compression_method: 1,
-            filter_method: 1,
-            interlace_method: 1,
+            bit_depth: BitDepth::One,
+            color_type: ColorType::Grayscale,
+            compression_method: CompressionMethod::Deflate,
+            filter_method: FilterMethod::Adaptive,
+            interlace_method: InterlaceMethod::None,
         }];
         let chunks = validate_chunks(Ok(chunks));
         assert!(chunks.is_err());
@@ -471,18 +817,17 @@ mod test {
 
     #[test]
     fn test_validate_chunks_no_iend() {
-        let data = Vec::new();
         let chunks = vec![
             PngChunk::IHDR {
                 width: 1,
                 height: 1,
-                bit_depth: 1,
-                color_type: 1,
-                compression_method: 1,
-                filter_method: 1,
-                interlace_method: 1,
+                bit_depth: BitDepth::One,
+                color_type: ColorType::Grayscale,
+                compression_method: CompressionMethod::Deflate,
+                filter_method: FilterMethod::Adaptive,
+                interlace_method: InterlaceMethod::None,
             },
-            PngChunk::IDAT { data: &data },
+            PngChunk::IDAT { data: Vec::new() },
         ];
         let chunks = validate_chunks(Ok(chunks));
         assert!(chunks.is_err());
@@ -495,20 +840,20 @@ mod test {
             PngChunk::IHDR {
                 width: 1,
                 height: 1,
-                bit_depth: 1,
-                color_type: 1,
-                compression_method: 1,
-                filter_method: 1,
-                interlace_method: 1,
+                bit_depth: BitDepth::One,
+                color_type: ColorType::Grayscale,
+                compression_method: CompressionMethod::Deflate,
+                filter_method: FilterMethod::Adaptive,
+                interlace_method: InterlaceMethod::None,
             },
             PngChunk::IHDR {
                 width: 1,
                 height: 1,
-                bit_depth: 1,
-                color_type: 1,
-                compression_method: 1,
-                filter_method: 1,
-                interlace_method: 1,
+                bit_depth: BitDepth::One,
+                color_type: ColorType::Grayscale,
+                compression_method: CompressionMethod::Deflate,
+                filter_method: FilterMethod::Adaptive,
+                interlace_method: InterlaceMethod::None,
             },
         ];
         let chunks = validate_chunks(Ok(chunks));
@@ -521,21 +866,19 @@ mod test {
 
     #[test]
     fn test_validate_chunks_multiple_separated_idat() {
-        let data = Vec::new();
-
         let chunks = vec![
             PngChunk::IHDR {
                 width: 1,
                 height: 1,
-                bit_depth: 1,
-                color_type: 1,
-                compression_method: 1,
-                filter_method: 1,
-                interlace_method: 1,
+                bit_depth: BitDepth::One,
+                color_type: ColorType::Grayscale,
+                compression_method: CompressionMethod::Deflate,
+                filter_method: FilterMethod::Adaptive,
+                interlace_method: InterlaceMethod::None,
             },
-            PngChunk::IDAT { data: &data },
-            PngChunk::Other, 
-            PngChunk::IDAT { data: &data },
+            PngChunk::IDAT { data: Vec::new() },
+            PngChunk::Other,
+            PngChunk::IDAT { data: Vec::new() },
         ];
         let chunks = validate_chunks(Ok(chunks));
         assert!(chunks.is_err());
@@ -547,19 +890,17 @@ mod test {
 
     #[test]
     fn test_validate_chunks_multiple_iend() {
-        let data = Vec::new();
-
         let chunks = vec![
             PngChunk::IHDR {
                 width: 1,
                 height: 1,
-                bit_depth: 1,
-                color_type: 1,
-                compression_method: 1,
-                filter_method: 1,
-                interlace_method: 1,
+                bit_depth: BitDepth::One,
+                color_type: ColorType::Grayscale,
+                compression_method: CompressionMethod::Deflate,
+                filter_method: FilterMethod::Adaptive,
+                interlace_method: InterlaceMethod::None,
             },
-            PngChunk::IDAT { data: &data },
+            PngChunk::IDAT { data: Vec::new() },
             PngChunk::IEND,
             PngChunk::IEND,
         ];
@@ -568,6 +909,18 @@ mod test {
         assert_eq!(
             chunks.err().unwrap().message(),
             "IEND chunk must be last".to_string()
+        );
+    }
+
+    #[test]
+    fn test_bytes_per_scanline() {
+        assert_eq!(
+            bytes_per_scanline(32, &ColorType::Grayscale, &BitDepth::One),
+            4
+        );
+        assert_eq!(
+            bytes_per_scanline(33, &ColorType::Grayscale, &BitDepth::One),
+            5
         );
     }
 }

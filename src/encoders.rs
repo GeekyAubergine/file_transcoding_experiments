@@ -1,3 +1,5 @@
+use miniz_oxide::inflate::DecompressError;
+
 use crate::{png::PNG, print_data_as_hex, ImageData};
 
 #[derive(Debug)]
@@ -9,9 +11,15 @@ pub enum EncoderError {
 impl EncoderError {
     pub fn message(&self) -> &str {
         match self {
-            EncoderError::InvalidData(message) => message,
             EncoderError::InvalidImageDimensions(message) => message,
+            EncoderError::InvalidData(message) => message,
         }
+    }
+}
+
+impl From<DecompressError> for EncoderError {
+    fn from(error: DecompressError) -> Self {
+        EncoderError::InvalidData(format!("Decompress error: {:?}", error.status))
     }
 }
 
